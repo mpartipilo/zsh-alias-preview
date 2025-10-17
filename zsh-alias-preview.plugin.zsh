@@ -5,70 +5,190 @@
 #   ALIAS_PREVIEW_POSITION - "above" or "below" (default: "above")
 #   ALIAS_PREVIEW_PREFIX - Text before expansion (default: "→ ")
 #   ALIAS_PREVIEW_COLOR - Color for preview (default: "cyan")
-#   ALIAS_PREVIEW_TRIGGER - "space" or "instant" (default: "space")
+#   ALIAS_PREVIEW_TRIGGER - "space", "instant", or "progressive" (default: "space")
 #     "space": Show preview only after typing alias + space
-#     "instant": Show preview as soon as current word matches an alias
+#     "instant": Show preview as soon as current word matches an alias exactly
+#     "progressive": Show preview for partial matches as you type (with debounce)
+#   ALIAS_PREVIEW_DEBOUNCE_MS - Debounce delay in ms for progressive mode (default: 100)
+#   ALIAS_PREVIEW_MAX_MATCHES - Maximum number of matches to show (default: 3)
 
 # Set defaults
 : ${ALIAS_PREVIEW_POSITION:="above"}
 : ${ALIAS_PREVIEW_PREFIX:="→ "}
 : ${ALIAS_PREVIEW_COLOR:="cyan"}
 : ${ALIAS_PREVIEW_TRIGGER:="space"}
+: ${ALIAS_PREVIEW_DEBOUNCE_MS:=100}
+: ${ALIAS_PREVIEW_MAX_MATCHES:=3}
 
-# Store the preview text
+# Store the preview text and state
 typeset -g _ALIAS_PREVIEW_TEXT=""
+typeset -g _ALIAS_PREVIEW_LAST_KEYSTROKE=0
+typeset -g _ALIAS_PREVIEW_LINES=0
+
+# Function to get current time in milliseconds
+_alias_preview_get_time_ms() {
+    # Use date command to get milliseconds
+    echo $(( $(date +%s) * 1000 + $(date +%N) / 1000000 ))
+}
 
 # Function to clear the preview
 _alias_preview_clear() {
-    if [[ -n "$_ALIAS_PREVIEW_TEXT" ]]; then
+    if [[ $_ALIAS_PREVIEW_LINES -gt 0 ]]; then
+        local lines=$_ALIAS_PREVIEW_LINES
+        
         if [[ "$ALIAS_PREVIEW_POSITION" == "above" ]]; then
-            # Move cursor up, clear line, move back down
-            echoti cuu1  # cursor up
-            echoti el    # erase line
+            # Move cursor up and clear each line
+            for (( i=0; i<lines; i++ )); do
+                echoti cuu1  # cursor up
+                echoti el    # erase line
+            done
         else
-            # Save cursor, move down, clear line, restore cursor
+            # Save cursor, move down and clear each line, restore cursor
             echoti sc    # save cursor
-            echoti cud1  # cursor down
-            echoti el    # erase line
+            for (( i=0; i<lines; i++ )); do
+                echoti cud1  # cursor down
+                echoti el    # erase line
+            done
             echoti rc    # restore cursor
         fi
-        _ALIAS_PREVIEW_TEXT=""
+        _ALIAS_PREVIEW_LINES=0
     fi
+    _ALIAS_PREVIEW_TEXT=""
 }
 
-# Function to display the preview
+# Function to display the preview (can be multiple lines)
 _alias_preview_show() {
-    local preview_text="$1"
+    local -a preview_lines=("${(@f)1}")  # Split by newlines
+    local line_count=${#preview_lines}
     
     if [[ "$ALIAS_PREVIEW_POSITION" == "above" ]]; then
         # Save cursor position
         echoti sc
-        # Move cursor up one line
-        echoti cuu1
-        # Clear the line
-        echoti el
-        # Print the preview with color
-        print -Pn "%F{${ALIAS_PREVIEW_COLOR}}${ALIAS_PREVIEW_PREFIX}${preview_text}%f"
+        # Move cursor up
+        for (( i=0; i<line_count; i++ )); do
+            echoti cuu1
+        done
+        # Print each line
+        local idx=0
+        for line in "${preview_lines[@]}"; do
+            echoti el  # clear line
+            if [[ $idx -eq 0 ]]; then
+                # First line with configured prefix and color
+                print -Pn "%F{${ALIAS_PREVIEW_COLOR}}${ALIAS_PREVIEW_PREFIX}${line}%f"
+            else
+                # Additional matches, indented
+                print -Pn "%F{${ALIAS_PREVIEW_COLOR}}  ${line}%f"
+            fi
+            if [[ $idx -lt $((line_count - 1)) ]]; then
+                echoti cud1  # move down for next line
+            fi
+            ((idx++))
+        done
         # Restore cursor position
         echoti rc
     else
         # Save cursor position
         echoti sc
-        # Move cursor down one line
-        echoti cud1
-        # Clear the line
-        echoti el
-        # Print the preview with color
-        print -Pn "%F{${ALIAS_PREVIEW_COLOR}}${ALIAS_PREVIEW_PREFIX}${preview_text}%f"
+        # Move cursor down and print lines
+        local idx=0
+        for line in "${preview_lines[@]}"; do
+            echoti cud1
+            echoti el
+            if [[ $idx -eq 0 ]]; then
+                print -Pn "%F{${ALIAS_PREVIEW_COLOR}}${ALIAS_PREVIEW_PREFIX}${line}%f"
+            else
+                print -Pn "%F{${ALIAS_PREVIEW_COLOR}}  ${line}%f"
+            fi
+            ((idx++))
+        done
         # Restore cursor position
         echoti rc
     fi
     
-    _ALIAS_PREVIEW_TEXT="$preview_text"
+    _ALIAS_PREVIEW_TEXT="$1"
+    _ALIAS_PREVIEW_LINES=$line_count
+}
+
+# Function to find matching aliases
+_alias_preview_find_matches() {
+    local search_term="$1"
+    local -a matches=()
+    local alias_name expansion
+    
+    # Search in regular aliases
+    for alias_name expansion in ${(kv)aliases}; do
+        if [[ "$alias_name" == "$search_term"* ]]; then
+            matches+=("$alias_name:$expansion")
+        fi
+    done
+    
+    # Search in global aliases
+    for alias_name expansion in ${(kv)galiases}; do
+        if [[ "$alias_name" == "$search_term"* ]]; then
+            matches+=("$alias_name:$expansion")
+        fi
+    done
+    
+    # Sort matches: exact match first, then by length, then alphabetically
+    local -a sorted_matches=()
+    local -a exact_matches=()
+    local -a prefix_matches=()
+    
+    for match in "${matches[@]}"; do
+        alias_name="${match%%:*}"
+        if [[ "$alias_name" == "$search_term" ]]; then
+            exact_matches+=("$match")
+        else
+            prefix_matches+=("$match")
+        fi
+    done
+    
+    # Sort prefix matches by length then alphabetically
+    prefix_matches=(${(on)prefix_matches})  # Sort alphabetically first
+    prefix_matches=(${(O)prefix_matches[@]})  # Reverse
+    prefix_matches=(${(on)prefix_matches[@]/(#m)*/${#MATCH%%:*}:$MATCH})  # Add length prefix
+    prefix_matches=(${prefix_matches[@]#*:})  # Remove length prefix
+    
+    # Combine: exact matches first, then prefix matches
+    sorted_matches=("${exact_matches[@]}" "${prefix_matches[@]}")
+    
+    # Return up to MAX_MATCHES
+    echo "${(F)sorted_matches[1,$ALIAS_PREVIEW_MAX_MATCHES]}"
 }
 
 # Main function to check for aliases and show preview
 _alias_preview_check() {
+    # Update last keystroke time
+    _ALIAS_PREVIEW_LAST_KEYSTROKE=$(_alias_preview_get_time_ms)
+    
+    # For progressive mode, we need to check debounce
+    if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
+        # Schedule a check after debounce period
+        _alias_preview_schedule_check
+        return
+    fi
+    
+    # For instant and space modes, check immediately
+    _alias_preview_do_check
+}
+
+# Function to schedule a debounced check (for progressive mode)
+_alias_preview_schedule_check() {
+    local check_time=$(( _ALIAS_PREVIEW_LAST_KEYSTROKE + ALIAS_PREVIEW_DEBOUNCE_MS ))
+    local current_time=$(_alias_preview_get_time_ms)
+    
+    if (( current_time >= check_time )); then
+        # Enough time has passed, do the check now
+        _alias_preview_do_check
+    else
+        # Not enough time, schedule for later
+        # We'll check on the next line-pre-redraw event
+        :
+    fi
+}
+
+# Actual check logic
+_alias_preview_do_check() {
     # Clear any existing preview first
     _alias_preview_clear
     
@@ -77,6 +197,15 @@ _alias_preview_check() {
     
     # If buffer is empty, nothing to do
     [[ -z "$buffer" ]] && return
+    
+    # For progressive mode, check if enough time has passed
+    if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
+        local current_time=$(_alias_preview_get_time_ms)
+        local time_since_keystroke=$(( current_time - _ALIAS_PREVIEW_LAST_KEYSTROKE ))
+        if (( time_since_keystroke < ALIAS_PREVIEW_DEBOUNCE_MS )); then
+            return  # Not enough time has passed
+        fi
+    fi
     
     # Split by common separators to handle multiple commands
     local commands
@@ -112,13 +241,36 @@ _alias_preview_check() {
                     
                     local potential_alias expansion
                     
-                    if [[ "$ALIAS_PREVIEW_TRIGGER" == "instant" ]]; then
-                        # In instant mode, check if the entire segment (or first word) is an alias
-                        # First, check if there's a space - if so, use first word
+                    if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
+                        # Progressive mode - find all matching aliases
                         if [[ "$cmd_segment" =~ ^([^[:space:]]+)[[:space:]] ]]; then
                             potential_alias="${match[1]}"
                         else
-                            # No space yet, check if entire segment is an alias
+                            potential_alias="$cmd_segment"
+                        fi
+                        
+                        if [[ -n "$potential_alias" ]]; then
+                            local matches=$(_alias_preview_find_matches "$potential_alias")
+                            if [[ -n "$matches" ]]; then
+                                # Format matches for display
+                                local -a display_lines=()
+                                local match alias_name expansion
+                                for match in ${(f)matches}; do
+                                    alias_name="${match%%:*}"
+                                    expansion="${match#*:}"
+                                    display_lines+=("$expansion")
+                                done
+                                
+                                _alias_preview_show "${(F)display_lines}"
+                                return
+                            fi
+                        fi
+                        
+                    elif [[ "$ALIAS_PREVIEW_TRIGGER" == "instant" ]]; then
+                        # Instant mode - exact match only
+                        if [[ "$cmd_segment" =~ ^([^[:space:]]+)[[:space:]] ]]; then
+                            potential_alias="${match[1]}"
+                        else
                             potential_alias="$cmd_segment"
                         fi
                         
@@ -135,9 +287,9 @@ _alias_preview_check() {
                             _alias_preview_show "$expansion"
                             return
                         fi
+                        
                     else
                         # "space" mode - only show preview after space
-                        # Get the first word (potential alias) followed by space
                         if [[ "$cmd_segment" =~ ^([^[:space:]]+)[[:space:]] ]]; then
                             potential_alias="${match[1]}"
                             
@@ -183,7 +335,7 @@ zle -N _alias_preview_widget
 zle -N _alias_preview_accept_line
 zle -N _alias_preview_clear_widget
 
-# Hook into self-insert to check after each character
+# Hook into line-pre-redraw to check after each change
 autoload -Uz add-zle-hook-widget
 add-zle-hook-widget line-pre-redraw _alias_preview_widget
 
