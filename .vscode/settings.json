@@ -1,0 +1,11 @@
+{
+  "go.goroot": "/Users/mpartipilo/.local/share/mise/installs/go/1.24.7",
+  "debug.javascript.defaultRuntimeExecutable": {
+    "pwa-node": "/Users/mpartipilo/.local/share/mise/shims/node"
+  },
+  "go.alternateTools": {
+    "go": "/Users/mpartipilo/.local/share/mise/shims/go",
+    "dlv": "/Users/mpartipilo/.local/share/mise/shims/dlv",
+    "gopls": "/Users/mpartipilo/.local/share/mise/shims/gopls"
+  }
+}

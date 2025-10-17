@@ -5,8 +5,7 @@
 #   ALIAS_PREVIEW_POSITION - "above" or "below" (default: "above")
 #   ALIAS_PREVIEW_PREFIX - Text before expansion (default: "→ ")
 #   ALIAS_PREVIEW_COLOR - Color for preview (default: "cyan")
-#   ALIAS_PREVIEW_TRIGGER - "space", "instant", or "progressive" (default: "space")
-#     "space": Show preview only after typing alias + space
+#   ALIAS_PREVIEW_TRIGGER - "instant" or "progressive" (default: "instant")
 #     "instant": Show preview as soon as current word matches an alias exactly
 #     "progressive": Show preview for partial matches as you type
 #   ALIAS_PREVIEW_MAX_MATCHES - Maximum number of matches to show (default: 3)
@@ -15,7 +14,7 @@
 : ${ALIAS_PREVIEW_POSITION:="above"}
 : ${ALIAS_PREVIEW_PREFIX:="→ "}
 : ${ALIAS_PREVIEW_COLOR:="cyan"}
-: ${ALIAS_PREVIEW_TRIGGER:="space"}
+: ${ALIAS_PREVIEW_TRIGGER:="instant"}
 : ${ALIAS_PREVIEW_MAX_MATCHES:=3}
 : ${ALIAS_PREVIEW_DEBUG:=0}  # Set to 1 to keep xtrace/debug output
 
@@ -191,41 +190,52 @@ _alias_preview_check() {
         seg="${seg%%[[:space:]]##}"
         [[ -z "$seg" ]] && continue
 
-        if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
-            potential_alias="${seg%% *}"  # first word (or entire seg if single word)
-            if [[ -n "$potential_alias" ]]; then
-                local matches=$(_alias_preview_find_matches "$potential_alias")
-                if [[ -n "$matches" ]]; then
-                    local -a display_lines=()
-                    for match in ${(f)matches}; do
-                        name="${match%%:*}"
-                        exp="${match#*:}"
-                        display_lines+=("$name → $exp")
-                    done
-                    _alias_preview_show "${(F)display_lines}"
-                    return
+        case "$ALIAS_PREVIEW_TRIGGER" in
+            progressive)
+                # Hide once a space and a non-space follow the alias
+                if [[ "$seg" == *' '* ]]; then
+                    # If second token started, abort preview
+                    local first_word="${seg%% *}"
+                    local rest="${seg#* }"
+                    if [[ -n "$rest" && "$rest" != [[:space:]]## ]]; then
+                        continue
+                    fi
                 fi
-            fi
-        elif [[ "$ALIAS_PREVIEW_TRIGGER" == "instant" ]]; then
-            potential_alias="${seg%% *}"
-            exp="${aliases[$potential_alias]}"
-            [[ -z "$exp" ]] && exp="${galiases[$potential_alias]}"
-            if [[ -n "$exp" ]]; then
-                _alias_preview_show "$exp"
-                return
-            fi
-        else
-            # space trigger
-            if [[ "$seg" == *' '* ]]; then
-                potential_alias="${seg%% *}"
+                potential_alias="${seg%% *}"  # first word (or entire seg)
+                if [[ -n "$potential_alias" ]]; then
+                    local matches=$(_alias_preview_find_matches "$potential_alias")
+                    if [[ -n "$matches" ]]; then
+                        local -a display_lines=()
+                        for match in ${(f)matches}; do
+                            name="${match%%:*}"
+                            exp="${match#*:}"
+                            display_lines+=("$name → $exp")
+                        done
+                        _alias_preview_show "${(F)display_lines}"
+                        return
+                    fi
+                fi
+                ;;
+            instant)
+                # Only show before any argument text appears
+                if [[ "$seg" == *' '* ]]; then
+                    local first_word="${seg%% *}"
+                    local rest="${seg#* }"
+                    if [[ -n "$rest" && "$rest" != [[:space:]]## ]]; then
+                        continue
+                    fi
+                    potential_alias="$first_word"
+                else
+                    potential_alias="$seg"
+                fi
                 exp="${aliases[$potential_alias]}"
                 [[ -z "$exp" ]] && exp="${galiases[$potential_alias]}"
                 if [[ -n "$exp" ]]; then
                     _alias_preview_show "$exp"
                     return
                 fi
-            fi
-        fi
+                ;;
+        esac
     done
 }
 
