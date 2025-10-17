@@ -8,8 +8,7 @@
 #   ALIAS_PREVIEW_TRIGGER - "space", "instant", or "progressive" (default: "space")
 #     "space": Show preview only after typing alias + space
 #     "instant": Show preview as soon as current word matches an alias exactly
-#     "progressive": Show preview for partial matches as you type (with debounce)
-#   ALIAS_PREVIEW_DEBOUNCE_MS - Debounce delay in ms for progressive mode (default: 100)
+#     "progressive": Show preview for partial matches as you type
 #   ALIAS_PREVIEW_MAX_MATCHES - Maximum number of matches to show (default: 3)
 
 # Set defaults
@@ -17,19 +16,11 @@
 : ${ALIAS_PREVIEW_PREFIX:="→ "}
 : ${ALIAS_PREVIEW_COLOR:="cyan"}
 : ${ALIAS_PREVIEW_TRIGGER:="space"}
-: ${ALIAS_PREVIEW_DEBOUNCE_MS:=100}
 : ${ALIAS_PREVIEW_MAX_MATCHES:=3}
 
 # Store the preview text and state
 typeset -g _ALIAS_PREVIEW_TEXT=""
-typeset -g _ALIAS_PREVIEW_LAST_KEYSTROKE=0
 typeset -g _ALIAS_PREVIEW_LINES=0
-
-# Function to get current time in milliseconds
-_alias_preview_get_time_ms() {
-    # Use date command to get milliseconds
-    echo $(( $(date +%s) * 1000 + $(date +%N) / 1000000 ))
-}
 
 # Function to clear the preview
 _alias_preview_clear() {
@@ -113,19 +104,19 @@ _alias_preview_show() {
 _alias_preview_find_matches() {
     local search_term="$1"
     local -a matches=()
-    local alias_name expansion
+    local name exp
     
     # Search in regular aliases
-    for alias_name expansion in ${(kv)aliases}; do
-        if [[ "$alias_name" == "$search_term"* ]]; then
-            matches+=("$alias_name:$expansion")
+    for name exp in ${(kv)aliases}; do
+        if [[ "$name" == "$search_term"* ]]; then
+            matches+=("$name:$exp")
         fi
     done
     
     # Search in global aliases
-    for alias_name expansion in ${(kv)galiases}; do
-        if [[ "$alias_name" == "$search_term"* ]]; then
-            matches+=("$alias_name:$expansion")
+    for name exp in ${(kv)galiases}; do
+        if [[ "$name" == "$search_term"* ]]; then
+            matches+=("$name:$exp")
         fi
     done
     
@@ -135,8 +126,8 @@ _alias_preview_find_matches() {
     local -a prefix_matches=()
     
     for match in "${matches[@]}"; do
-        alias_name="${match%%:*}"
-        if [[ "$alias_name" == "$search_term" ]]; then
+        name="${match%%:*}"
+        if [[ "$name" == "$search_term" ]]; then
             exact_matches+=("$match")
         else
             prefix_matches+=("$match")
@@ -158,37 +149,6 @@ _alias_preview_find_matches() {
 
 # Main function to check for aliases and show preview
 _alias_preview_check() {
-    # Update last keystroke time
-    _ALIAS_PREVIEW_LAST_KEYSTROKE=$(_alias_preview_get_time_ms)
-    
-    # For progressive mode, we need to check debounce
-    if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
-        # Schedule a check after debounce period
-        _alias_preview_schedule_check
-        return
-    fi
-    
-    # For instant and space modes, check immediately
-    _alias_preview_do_check
-}
-
-# Function to schedule a debounced check (for progressive mode)
-_alias_preview_schedule_check() {
-    local check_time=$(( _ALIAS_PREVIEW_LAST_KEYSTROKE + ALIAS_PREVIEW_DEBOUNCE_MS ))
-    local current_time=$(_alias_preview_get_time_ms)
-    
-    if (( current_time >= check_time )); then
-        # Enough time has passed, do the check now
-        _alias_preview_do_check
-    else
-        # Not enough time, schedule for later
-        # We'll check on the next line-pre-redraw event
-        :
-    fi
-}
-
-# Actual check logic
-_alias_preview_do_check() {
     # Clear any existing preview first
     _alias_preview_clear
     
@@ -197,15 +157,6 @@ _alias_preview_do_check() {
     
     # If buffer is empty, nothing to do
     [[ -z "$buffer" ]] && return
-    
-    # For progressive mode, check if enough time has passed
-    if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
-        local current_time=$(_alias_preview_get_time_ms)
-        local time_since_keystroke=$(( current_time - _ALIAS_PREVIEW_LAST_KEYSTROKE ))
-        if (( time_since_keystroke < ALIAS_PREVIEW_DEBOUNCE_MS )); then
-            return  # Not enough time has passed
-        fi
-    fi
     
     # Split by common separators to handle multiple commands
     local commands
@@ -239,7 +190,7 @@ _alias_preview_do_check() {
                     cmd_segment="${cmd_segment## #}"
                     cmd_segment="${cmd_segment%% #}"
                     
-                    local potential_alias expansion
+                    local potential_alias exp
                     
                     if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
                         # Progressive mode - find all matching aliases
@@ -254,11 +205,11 @@ _alias_preview_do_check() {
                             if [[ -n "$matches" ]]; then
                                 # Format matches for display
                                 local -a display_lines=()
-                                local match alias_name expansion
+                                local match name exp
                                 for match in ${(f)matches}; do
-                                    alias_name="${match%%:*}"
-                                    expansion="${match#*:}"
-                                    display_lines+=("$expansion")
+                                    name="${match%%:*}"
+                                    exp="${match#*:}"
+                                    display_lines+=("[$name] → $exp")
                                 done
                                 
                                 _alias_preview_show "${(F)display_lines}"
@@ -275,16 +226,16 @@ _alias_preview_do_check() {
                         fi
                         
                         # Check if it's a regular alias
-                        expansion="${aliases[$potential_alias]}"
+                        exp="${aliases[$potential_alias]}"
                         
                         # If not found, check global aliases
-                        if [[ -z "$expansion" ]]; then
-                            expansion="${galiases[$potential_alias]}"
+                        if [[ -z "$exp" ]]; then
+                            exp="${galiases[$potential_alias]}"
                         fi
                         
                         # If we found an expansion, show it
-                        if [[ -n "$expansion" ]]; then
-                            _alias_preview_show "$expansion"
+                        if [[ -n "$exp" ]]; then
+                            _alias_preview_show "$exp"
                             return
                         fi
                         
@@ -294,16 +245,16 @@ _alias_preview_do_check() {
                             potential_alias="${match[1]}"
                             
                             # Check if it's a regular alias
-                            expansion="${aliases[$potential_alias]}"
+                            exp="${aliases[$potential_alias]}"
                             
                             # If not found, check global aliases
-                            if [[ -z "$expansion" ]]; then
-                                expansion="${galiases[$potential_alias]}"
+                            if [[ -z "$exp" ]]; then
+                                exp="${galiases[$potential_alias]}"
                             fi
                             
                             # If we found an expansion, show it
-                            if [[ -n "$expansion" ]]; then
-                                _alias_preview_show "$expansion"
+                            if [[ -n "$exp" ]]; then
+                                _alias_preview_show "$exp"
                                 return
                             fi
                         fi
