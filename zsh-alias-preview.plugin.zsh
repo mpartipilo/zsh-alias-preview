@@ -17,6 +17,7 @@
 : ${ALIAS_PREVIEW_COLOR:="cyan"}
 : ${ALIAS_PREVIEW_TRIGGER:="space"}
 : ${ALIAS_PREVIEW_MAX_MATCHES:=3}
+: ${ALIAS_PREVIEW_DEBUG:=0}  # Set to 1 to keep xtrace/debug output
 
 # Store the preview text and state
 typeset -g _ALIAS_PREVIEW_TEXT=""
@@ -24,6 +25,8 @@ typeset -g _ALIAS_PREVIEW_LINES=0
 
 # Function to clear the preview
 _alias_preview_clear() {
+    emulate -L zsh
+    [[ $ALIAS_PREVIEW_DEBUG -eq 1 ]] || setopt no_xtrace
     if [[ $_ALIAS_PREVIEW_LINES -gt 0 ]]; then
         local lines=$_ALIAS_PREVIEW_LINES
         
@@ -49,6 +52,8 @@ _alias_preview_clear() {
 
 # Function to display the preview (can be multiple lines)
 _alias_preview_show() {
+    emulate -L zsh
+    [[ $ALIAS_PREVIEW_DEBUG -eq 1 ]] || setopt no_xtrace
     local -a preview_lines=("${(@f)1}")  # Split by newlines
     local line_count=${#preview_lines}
     
@@ -102,29 +107,36 @@ _alias_preview_show() {
 
 # Function to find matching aliases
 _alias_preview_find_matches() {
+    emulate -L zsh
+    [[ $ALIAS_PREVIEW_DEBUG -eq 1 ]] || setopt no_xtrace
     local search_term="$1"
     local -a matches=()
     local name exp
     
+    # IMPORTANT: iterate over keys only and fetch value separately so values containing spaces
+    # (e.g. 'git add') are not word-split and paired with the next key by mistake.
+    # Previous implementation used 'for name exp in ${(kv)aliases};' which splits values on
+    # whitespace, leading to corrupted key/value pairs and displaying the expanded value in
+    # the bracket instead of the alias name.
+    
     # Search in regular aliases
-    for name exp in ${(kv)aliases}; do
+    for name in ${(k)aliases}; do
+        exp=${aliases[$name]}
         if [[ "$name" == "$search_term"* ]]; then
             matches+=("$name:$exp")
         fi
     done
-    
+
     # Search in global aliases
-    for name exp in ${(kv)galiases}; do
+    for name in ${(k)galiases}; do
+        exp=${galiases[$name]}
         if [[ "$name" == "$search_term"* ]]; then
             matches+=("$name:$exp")
         fi
     done
     
-    # Sort matches: exact match first, then by length, then alphabetically
-    local -a sorted_matches=()
-    local -a exact_matches=()
-    local -a prefix_matches=()
-    
+    # Separate exact vs prefix matches
+    local -a exact_matches prefix_matches sorted_matches
     for match in "${matches[@]}"; do
         name="${match%%:*}"
         if [[ "$name" == "$search_term" ]]; then
@@ -133,22 +145,30 @@ _alias_preview_find_matches() {
             prefix_matches+=("$match")
         fi
     done
-    
-    # Sort prefix matches by length then alphabetically
-    prefix_matches=(${(on)prefix_matches})  # Sort alphabetically first
-    prefix_matches=(${(O)prefix_matches[@]})  # Reverse
-    prefix_matches=(${(on)prefix_matches[@]/(#m)*/${#MATCH%%:*}:$MATCH})  # Add length prefix
-    prefix_matches=(${prefix_matches[@]#*:})  # Remove length prefix
-    
-    # Combine: exact matches first, then prefix matches
-    sorted_matches=("${exact_matches[@]}" "${prefix_matches[@]}")
-    
-    # Return up to MAX_MATCHES
+
+    # Sort prefix matches by alias length (shortest first) then alphabetically.
+    # Build sortable keys: zero-padded length + NUL + original (NUL simulated by unlikely sequence) then strip.
+    local -a keyed prefix_sorted
+    local key len
+    for match in "${prefix_matches[@]}"; do
+        name="${match%%:*}"
+        len=${#name}
+        # Pad length to 4 digits to preserve numeric order in lexicographic sort
+        key="${(l:4::0:)len}|$match"
+        keyed+=("$key")
+    done
+    prefix_sorted=(${(on)keyed})
+    # Strip key prefix
+    prefix_sorted=(${prefix_sorted[@]#????|})
+
+    sorted_matches=("${exact_matches[@]}" "${prefix_sorted[@]}")
     echo "${(F)sorted_matches[1,$ALIAS_PREVIEW_MAX_MATCHES]}"
 }
 
 # Main function to check for aliases and show preview
 _alias_preview_check() {
+    emulate -L zsh
+    [[ $ALIAS_PREVIEW_DEBUG -eq 1 ]] || setopt no_xtrace
     # Clear any existing preview first
     _alias_preview_clear
     
@@ -158,126 +178,76 @@ _alias_preview_check() {
     # If buffer is empty, nothing to do
     [[ -z "$buffer" ]] && return
     
-    # Split by common separators to handle multiple commands
-    local commands
-    commands=("${(@s/;/)buffer}")
-    
-    # Process each command segment
-    local cmd_segment
-    for cmd_segment in $commands; do
-        # Remove leading/trailing whitespace
-        cmd_segment="${cmd_segment## #}"
-        cmd_segment="${cmd_segment%% #}"
-        
-        # Also split by && and ||
-        local subcmds
-        subcmds=("${(@s/&&/)cmd_segment}")
-        
-        for cmd_segment in $subcmds; do
-            subcmds=("${(@s/||/)cmd_segment}")
-            
-            for cmd_segment in $subcmds; do
-                # Remove leading/trailing whitespace again
-                cmd_segment="${cmd_segment## #}"
-                cmd_segment="${cmd_segment%% #}"
-                
-                # Also handle pipes
-                local pipe_cmds
-                pipe_cmds=("${(@s/|/)cmd_segment}")
-                
-                for cmd_segment in $pipe_cmds; do
-                    # Remove leading/trailing whitespace
-                    cmd_segment="${cmd_segment## #}"
-                    cmd_segment="${cmd_segment%% #}"
-                    
-                    local potential_alias exp
-                    
-                    if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
-                        # Progressive mode - find all matching aliases
-                        if [[ "$cmd_segment" =~ ^([^[:space:]]+)[[:space:]] ]]; then
-                            potential_alias="${match[1]}"
-                        else
-                            potential_alias="$cmd_segment"
-                        fi
-                        
-                        if [[ -n "$potential_alias" ]]; then
-                            local matches=$(_alias_preview_find_matches "$potential_alias")
-                            if [[ -n "$matches" ]]; then
-                                # Format matches for display
-                                local -a display_lines=()
-                                local match name exp
-                                for match in ${(f)matches}; do
-                                    name="${match%%:*}"
-                                    exp="${match#*:}"
-                                    display_lines+=("[$name] → $exp")
-                                done
-                                
-                                _alias_preview_show "${(F)display_lines}"
-                                return
-                            fi
-                        fi
-                        
-                    elif [[ "$ALIAS_PREVIEW_TRIGGER" == "instant" ]]; then
-                        # Instant mode - exact match only
-                        if [[ "$cmd_segment" =~ ^([^[:space:]]+)[[:space:]] ]]; then
-                            potential_alias="${match[1]}"
-                        else
-                            potential_alias="$cmd_segment"
-                        fi
-                        
-                        # Check if it's a regular alias
-                        exp="${aliases[$potential_alias]}"
-                        
-                        # If not found, check global aliases
-                        if [[ -z "$exp" ]]; then
-                            exp="${galiases[$potential_alias]}"
-                        fi
-                        
-                        # If we found an expansion, show it
-                        if [[ -n "$exp" ]]; then
-                            _alias_preview_show "$exp"
-                            return
-                        fi
-                        
-                    else
-                        # "space" mode - only show preview after space
-                        if [[ "$cmd_segment" =~ ^([^[:space:]]+)[[:space:]] ]]; then
-                            potential_alias="${match[1]}"
-                            
-                            # Check if it's a regular alias
-                            exp="${aliases[$potential_alias]}"
-                            
-                            # If not found, check global aliases
-                            if [[ -z "$exp" ]]; then
-                                exp="${galiases[$potential_alias]}"
-                            fi
-                            
-                            # If we found an expansion, show it
-                            if [[ -n "$exp" ]]; then
-                                _alias_preview_show "$exp"
-                                return
-                            fi
-                        fi
-                    fi
-                done
-            done
-        done
+    # Normalize separators by replacing &&, ||, | with ; so we can iterate simply.
+    local normalized=${buffer//&&/;}
+    normalized=${normalized//||/;}
+    normalized=${normalized//|/;}
+    local -a segments=("${(@s/;/)normalized}")
+
+    local seg potential_alias exp match name
+    for seg in "${segments[@]}"; do
+        # Trim leading/trailing whitespace (zsh pattern trims all spaces)
+        seg="${seg##[[:space:]]##}"
+        seg="${seg%%[[:space:]]##}"
+        [[ -z "$seg" ]] && continue
+
+        if [[ "$ALIAS_PREVIEW_TRIGGER" == "progressive" ]]; then
+            potential_alias="${seg%% *}"  # first word (or entire seg if single word)
+            if [[ -n "$potential_alias" ]]; then
+                local matches=$(_alias_preview_find_matches "$potential_alias")
+                if [[ -n "$matches" ]]; then
+                    local -a display_lines=()
+                    for match in ${(f)matches}; do
+                        name="${match%%:*}"
+                        exp="${match#*:}"
+                        display_lines+=("$name → $exp")
+                    done
+                    _alias_preview_show "${(F)display_lines}"
+                    return
+                fi
+            fi
+        elif [[ "$ALIAS_PREVIEW_TRIGGER" == "instant" ]]; then
+            potential_alias="${seg%% *}"
+            exp="${aliases[$potential_alias]}"
+            [[ -z "$exp" ]] && exp="${galiases[$potential_alias]}"
+            if [[ -n "$exp" ]]; then
+                _alias_preview_show "$exp"
+                return
+            fi
+        else
+            # space trigger
+            if [[ "$seg" == *' '* ]]; then
+                potential_alias="${seg%% *}"
+                exp="${aliases[$potential_alias]}"
+                [[ -z "$exp" ]] && exp="${galiases[$potential_alias]}"
+                if [[ -n "$exp" ]]; then
+                    _alias_preview_show "$exp"
+                    return
+                fi
+            fi
+        fi
     done
 }
 
 # Widget to handle the preview
 _alias_preview_widget() {
+    emulate -L zsh
+    [[ $ALIAS_PREVIEW_DEBUG -eq 1 ]] || setopt no_xtrace
     _alias_preview_check
 }
 
 # Widget for accept-line to clear preview before execution
 _alias_preview_accept_line() {
+    emulate -L zsh
+    [[ $ALIAS_PREVIEW_DEBUG -eq 1 ]] || setopt no_xtrace
     _alias_preview_clear
     zle .accept-line
 }
 
 # Widget for other actions that should clear the preview
 _alias_preview_clear_widget() {
+    emulate -L zsh
+    [[ $ALIAS_PREVIEW_DEBUG -eq 1 ]] || setopt no_xtrace
     _alias_preview_clear
 }
 
@@ -298,6 +268,8 @@ add-zle-hook-widget line-init _alias_preview_clear_widget
 
 # Handle Ctrl-C to clear preview
 _alias_preview_sigint() {
+    emulate -L zsh
+    [[ $ALIAS_PREVIEW_DEBUG -eq 1 ]] || setopt no_xtrace
     _alias_preview_clear
 }
 trap _alias_preview_sigint INT
